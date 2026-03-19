@@ -119,6 +119,7 @@ namespace FidelityFX
         private RenderTexture _originalRenderTarget;
         private DepthTextureMode _originalDepthTextureMode;
         private Rect _originalRect;
+        private bool _originAllowDynamicResolution;
 
         private Fsr3Upscaler.QualityMode _prevQualityMode;
         private Vector2Int _prevDisplaySize;
@@ -136,9 +137,11 @@ namespace FidelityFX
             _renderCamera = GetComponent<Camera>();
             _originalRenderTarget = _renderCamera.targetTexture;
             _originalDepthTextureMode = _renderCamera.depthTextureMode;
+            _originAllowDynamicResolution = _renderCamera.allowDynamicResolution;
             _renderCamera.targetTexture = null;     // Clear the camera's target texture so we can fully control how the output gets written
             _renderCamera.depthTextureMode = _originalDepthTextureMode | DepthTextureMode.Depth | DepthTextureMode.MotionVectors;
-            
+            _renderCamera.allowDynamicResolution = true;
+
             // Determine the desired rendering and display resolutions
             _displaySize = GetDisplaySize();
             Fsr3Upscaler.GetRenderResolutionFromQualityMode(out var maxRenderWidth, out var maxRenderHeight, _displaySize.x, _displaySize.y, qualityMode);
@@ -186,6 +189,7 @@ namespace FidelityFX
             // Restore the camera's original state
             _renderCamera.depthTextureMode = _originalDepthTextureMode;
             _renderCamera.targetTexture = _originalRenderTarget;
+            _renderCamera.allowDynamicResolution = _originAllowDynamicResolution;
         }
 
         private void CreateFsrContext()
