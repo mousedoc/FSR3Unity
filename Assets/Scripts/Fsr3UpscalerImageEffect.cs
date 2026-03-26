@@ -1,4 +1,4 @@
-// Copyright (c) 2024 Nico de Poel
+﻿// Copyright (c) 2024 Nico de Poel
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -23,6 +23,7 @@ using UnityEngine;
 using UnityEngine.Experimental.Rendering;
 using UnityEngine.Rendering;
 using FidelityFX.FSR3;
+using System.Collections.Generic;
 
 namespace FidelityFX
 {
@@ -32,18 +33,25 @@ namespace FidelityFX
     /// This component also exposes various FSR3 Upscaler parameters to the Unity inspector.
     /// </summary>
     [RequireComponent(typeof(Camera))]
+    //[ImageEffectAllowedInSceneView] // 켜면 크래시 남
     public class Fsr3UpscalerImageEffect : MonoBehaviour
     {
+        public static HashSet<Fsr3UpscalerImageEffect> Instances { get; set; } = new HashSet<Fsr3UpscalerImageEffect>();
+
         public IFsr3UpscalerCallbacks Callbacks { get; set; } = new Fsr3UpscalerCallbacksBase();
-        
+
         [Tooltip("Standard scaling ratio presets.")]
-        public Fsr3Upscaler.QualityMode qualityMode = Fsr3Upscaler.QualityMode.Quality;
+        public Fsr3Upscaler.QualityMode qualityMode = Fsr3Upscaler.QualityMode.NativeAA;
+
+        public static bool Enable { get; private set; }
+
+        public static Fsr3Upscaler.QualityMode CurrentQualityMode { get; private set; }
 
         [Tooltip("Apply RCAS sharpening to the image after upscaling.")]
         public bool performSharpenPass = true;
         [Tooltip("Strength of the sharpening effect.")]
         [Range(0, 1)] public float sharpness = 0.8f;
-        
+
         [Tooltip("Adjust the influence of motion vectors on temporal accumulation.")]
         [Range(0, 1)] public float velocityFactor = 1.0f;
 
@@ -59,7 +67,7 @@ namespace FidelityFX
         [Tooltip("Enable a debug view to analyze the upscaling process.")]
         public bool enableDebugView = false;
 
-        [Header("Reactivity, Transparency & Composition")] 
+        [Header("Reactivity, Transparency & Composition")]
         [Tooltip("Optional texture to control the influence of the current frame on the reconstructed output. If unset, either an auto-generated or a default cleared reactive mask will be used.")]
         public Texture reactiveMask = null;
         [Tooltip("Optional texture for marking areas of specialist rendering which should be accounted for during the upscaling process. If unset, a default cleared mask will be used.")]
@@ -69,7 +77,7 @@ namespace FidelityFX
         [Tooltip("Parameters to control the process of auto-generating a reactive mask.")]
         [SerializeField] private GenerateReactiveParameters generateReactiveParameters = new GenerateReactiveParameters();
         public GenerateReactiveParameters GenerateReactiveParams => generateReactiveParameters;
-        
+
         [Serializable]
         public class GenerateReactiveParameters
         {
@@ -88,7 +96,7 @@ namespace FidelityFX
         [Tooltip("Parameters to control the process of auto-generating transparency and composition masks.")]
         [SerializeField] private GenerateTcrParameters generateTransparencyAndCompositionParameters = new GenerateTcrParameters();
         public GenerateTcrParameters GenerateTcrParams => generateTransparencyAndCompositionParameters;
-        
+
         [Serializable]
         public class GenerateTcrParameters
         {
@@ -109,17 +117,16 @@ namespace FidelityFX
         private Vector2Int _maxRenderSize;
         private Vector2Int _displaySize;
         private bool _resetHistory;
-        
+
         private readonly Fsr3Upscaler.DispatchDescription _dispatchDescription = new Fsr3Upscaler.DispatchDescription();
         private readonly Fsr3Upscaler.GenerateReactiveDescription _genReactiveDescription = new Fsr3Upscaler.GenerateReactiveDescription();
 
         private Fsr3UpscalerImageEffectHelper _helper;
-        
+
         private Camera _renderCamera;
         private RenderTexture _originalRenderTarget;
         private DepthTextureMode _originalDepthTextureMode;
         private Rect _originalRect;
-        private bool _originAllowDynamicResolution;
 
         private Fsr3Upscaler.QualityMode _prevQualityMode;
         private Vector2Int _prevDisplaySize;
@@ -137,10 +144,8 @@ namespace FidelityFX
             _renderCamera = GetComponent<Camera>();
             _originalRenderTarget = _renderCamera.targetTexture;
             _originalDepthTextureMode = _renderCamera.depthTextureMode;
-            _originAllowDynamicResolution = _renderCamera.allowDynamicResolution;
             _renderCamera.targetTexture = null;     // Clear the camera's target texture so we can fully control how the output gets written
             _renderCamera.depthTextureMode = _originalDepthTextureMode | DepthTextureMode.Depth | DepthTextureMode.MotionVectors;
-            _renderCamera.allowDynamicResolution = true;
 
             // Determine the desired rendering and display resolutions
             _displaySize = GetDisplaySize();
@@ -153,7 +158,7 @@ namespace FidelityFX
                 enabled = false;
                 return;
             }
-            
+
             if (assets == null)
             {
                 Debug.LogError($"FSR3 Upscaler assets are not assigned! Please ensure an {nameof(Fsr3UpscalerAssets)} asset is assigned to the Assets property of this component.");
@@ -167,12 +172,16 @@ namespace FidelityFX
                 enabled = false;
                 return;
             }
-            
+
             _helper = GetComponent<Fsr3UpscalerImageEffectHelper>();
             _copyWithDepthMaterial = new Material(Shader.Find("Hidden/BlitCopyWithDepth"));
-            
+
             CreateFsrContext();
             CreateCommandBuffers();
+
+            Enable = true;
+
+            Instances.Add(this);
         }
 
         private void OnDisable()
@@ -185,11 +194,17 @@ namespace FidelityFX
                 Destroy(_copyWithDepthMaterial);
                 _copyWithDepthMaterial = null;
             }
-            
+
             // Restore the camera's original state
             _renderCamera.depthTextureMode = _originalDepthTextureMode;
             _renderCamera.targetTexture = _originalRenderTarget;
-            _renderCamera.allowDynamicResolution = _originAllowDynamicResolution;
+
+            Enable = false;
+        }
+
+        private void OnDestroy()
+        {
+            Instances.Remove(this);
         }
 
         private void CreateFsrContext()
@@ -204,15 +219,16 @@ namespace FidelityFX
 
             _prevDisplaySize = _displaySize;
             _prevQualityMode = qualityMode;
+            CurrentQualityMode = qualityMode;
             _prevAutoExposure = enableAutoExposure;
-            
+
             ApplyMipmapBias();
         }
 
         private void DestroyFsrContext()
         {
             UndoMipmapBias();
-            
+
             if (_context != null)
             {
                 _context.Destroy();
@@ -224,14 +240,14 @@ namespace FidelityFX
         {
             _dispatchCommandBuffer = new CommandBuffer { name = "FSR3 Upscaler Dispatch" };
             _opaqueInputCommandBuffer = new CommandBuffer { name = "FSR3 Upscaler Opaque Input" };
-            _renderCamera.AddCommandBuffer(CameraEvent.BeforeForwardAlpha, _opaqueInputCommandBuffer);
+            _renderCamera.AddCommandBuffer(CameraEvent.BeforeForwardOpaque, _opaqueInputCommandBuffer);
         }
 
         private void DestroyCommandBuffers()
         {
             if (_opaqueInputCommandBuffer != null)
             {
-                _renderCamera.RemoveCommandBuffer(CameraEvent.BeforeForwardAlpha, _opaqueInputCommandBuffer);
+                _renderCamera.RemoveCommandBuffer(CameraEvent.BeforeForwardOpaque, _opaqueInputCommandBuffer);
                 _opaqueInputCommandBuffer.Release();
                 _opaqueInputCommandBuffer = null;
             }
@@ -242,7 +258,7 @@ namespace FidelityFX
                 _dispatchCommandBuffer = null;
             }
         }
-        
+
         private void ApplyMipmapBias()
         {
             // Apply a mipmap bias so that textures retain their sharpness
@@ -289,9 +305,14 @@ namespace FidelityFX
             {
                 // Render to a smaller portion of the screen by manipulating the camera's viewport rect
                 _renderCamera.aspect = (float)_displaySize.x / _displaySize.y;
-                _renderCamera.rect = new Rect(0, 0, _originalRect.width * _maxRenderSize.x / _renderCamera.pixelWidth, _originalRect.height * _maxRenderSize.y / _renderCamera.pixelHeight);
+                _renderCamera.rect = new Rect(
+                    _originalRect.x,
+                    _originalRect.y,
+                    _originalRect.width * ((float)_maxRenderSize.x / _renderCamera.pixelWidth),
+                    _originalRect.height * ((float)_maxRenderSize.y / _renderCamera.pixelHeight)
+                );
             }
-            
+
             // Set up the opaque-only command buffer to make a copy of the camera color buffer right before transparent drawing starts 
             _opaqueInputCommandBuffer.Clear();
             if (autoGenerateReactiveMask || autoGenerateTransparencyAndComposition)
@@ -305,9 +326,9 @@ namespace FidelityFX
             {
                 SetupAutoReactiveDescription();
             }
-            
+
             SetupDispatchDescription();
-            
+
             ApplyJitter();
         }
 
@@ -320,13 +341,13 @@ namespace FidelityFX
             _dispatchDescription.Exposure = ResourceView.Unassigned;
             _dispatchDescription.Reactive = ResourceView.Unassigned;
             _dispatchDescription.TransparencyAndComposition = ResourceView.Unassigned;
-            
+
             if (!enableAutoExposure && exposure != null) _dispatchDescription.Exposure = new ResourceView(exposure);
             if (reactiveMask != null) _dispatchDescription.Reactive = new ResourceView(reactiveMask);
             if (transparencyAndCompositionMask != null) _dispatchDescription.TransparencyAndComposition = new ResourceView(transparencyAndCompositionMask);
 
             var scaledRenderSize = GetScaledRenderSize();
-            
+
             _dispatchDescription.Output = new ResourceView(Fsr3ShaderIDs.UavUpscaledOutput);
             _dispatchDescription.PreExposure = preExposure;
             _dispatchDescription.EnableSharpening = performSharpenPass;
@@ -379,7 +400,7 @@ namespace FidelityFX
         private void ApplyJitter()
         {
             var scaledRenderSize = GetScaledRenderSize();
-            
+
             // Perform custom jittering of the camera's projection matrix according to FSR3's recipe
             int jitterPhaseCount = Fsr3Upscaler.GetJitterPhaseCount(scaledRenderSize.x, _displaySize.x);
             Fsr3Upscaler.GetJitterOffset(out float jitterX, out float jitterY, Time.frameCount, jitterPhaseCount);
@@ -394,7 +415,7 @@ namespace FidelityFX
             _renderCamera.projectionMatrix = jitterTranslationMatrix * _renderCamera.nonJitteredProjectionMatrix;
             _renderCamera.useJitteredProjectionMatrixForTransparentRendering = true;
         }
-        
+
         private void OnRenderImage(RenderTexture src, RenderTexture dest)
         {
             // Restore the camera's viewport rect so we can output at full resolution
@@ -429,7 +450,7 @@ namespace FidelityFX
                 // Output directly to the backbuffer
                 _dispatchCommandBuffer.Blit(Fsr3ShaderIDs.UavUpscaledOutput, dest);
             }
-            
+
             _dispatchCommandBuffer.ReleaseTemporaryRT(Fsr3ShaderIDs.UavUpscaledOutput);
             _dispatchCommandBuffer.ReleaseTemporaryRT(Fsr3ShaderIDs.UavAutoReactive);
 
@@ -452,7 +473,7 @@ namespace FidelityFX
 
             return _renderCamera.allowHDR ? RenderTextureFormat.DefaultHDR : RenderTextureFormat.Default;
         }
-        
+
         private BuiltinRenderTextureType GetDepthTexture()
         {
             RenderingPath renderingPath = _renderCamera.renderingPath;
@@ -463,7 +484,7 @@ namespace FidelityFX
         {
             if (_originalRenderTarget != null)
                 return new Vector2Int(_originalRenderTarget.width, _originalRenderTarget.height);
-            
+
             return new Vector2Int(_renderCamera.pixelWidth, _renderCamera.pixelHeight);
         }
 
@@ -476,11 +497,11 @@ namespace FidelityFX
         {
             if (UsingDynamicResolution())
                 return new Vector2Int(Mathf.CeilToInt(_maxRenderSize.x * ScalableBufferManager.widthScaleFactor), Mathf.CeilToInt(_maxRenderSize.y * ScalableBufferManager.heightScaleFactor));
-            
+
             return _maxRenderSize;
         }
-        
-        #if UNITY_EDITOR
+
+#if UNITY_EDITOR
         private void Reset()
         {
             if (assets != null)
@@ -493,6 +514,26 @@ namespace FidelityFX
             string assetPath = UnityEditor.AssetDatabase.GUIDToAssetPath(assetGuids[0]);
             assets = UnityEditor.AssetDatabase.LoadAssetAtPath<Fsr3UpscalerAssets>(assetPath);
         }
-        #endif
+#endif
+
+        public void InitManuallyFSR2()
+        {
+            if (assets != null)
+            {
+                return;
+            }
+
+            assets = Resources.Load<Fsr3UpscalerAssets>("FSR2 Assets");
+        }
+
+        public void InitManuallyFSR3()
+        {
+            if (assets != null)
+            {
+                return;
+            }
+
+            assets = Resources.Load<Fsr3UpscalerAssets>("FSR3 Upscaler Assets");
+        }
     }
 }
